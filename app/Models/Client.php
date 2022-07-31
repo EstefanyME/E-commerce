@@ -13,7 +13,13 @@ class Client extends Authenticatable
     protected $fillable = [
         'name',
         'phone',
-        'email'
+        'email',
+        'password'
+    ];
+
+    protected $hidden = [
+        'password',
+        'remember_token'
     ];
     
     public function getAuthPassword()
@@ -25,4 +31,5 @@ class Client extends Authenticatable
     public function scopeFilterBy($query,$filter){
         $query->where('name','like','%' . $filter . '%')->orWhere('email','like','%' . $filter . '%');
     }
+    
 }
