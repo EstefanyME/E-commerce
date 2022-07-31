@@ -34,5 +34,5 @@ Route::resource('/categories',App\Http\Controllers\CategoryController::class)
 Route::get('/products/json',[App\Http\Controllers\ProductController::class,'json']);
 Route::resource('/products',App\Http\Controllers\ProductController::class)
     ->except('create','show','edit');
-//Route::get('/users/json',[App\Http\Controllers\UserController::class,'json']);
-//Route::get('/clients/json',[App\Http\Controllers\ClientController::class,'json']);
+Route::post('/cart/add',[App\Http\Controllers\CartController::class,'add']);
+Route::get('/cart',[App\Http\Controllers\CartController::class,'index'])->name('cart');

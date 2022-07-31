@@ -3202,6 +3202,407 @@ function withinMaxClamp(min, value, max) {
 
 /***/ }),
 
+/***/ "./node_modules/accounting/accounting.js":
+/*!***********************************************!*\
+  !*** ./node_modules/accounting/accounting.js ***!
+  \***********************************************/
+/***/ (function(module, exports) {
+
+/*!
+ * accounting.js v0.4.1
+ * Copyright 2014 Open Exchange Rates
+ *
+ * Freely distributable under the MIT license.
+ * Portions of accounting.js are inspired or borrowed from underscore.js
+ *
+ * Full details and documentation:
+ * http://openexchangerates.github.io/accounting.js/
+ */
+
+(function(root, undefined) {
+
+	/* --- Setup --- */
+
+	// Create the local library object, to be exported or referenced globally later
+	var lib = {};
+
+	// Current version
+	lib.version = '0.4.1';
+
+
+	/* --- Exposed settings --- */
+
+	// The library's settings configuration object. Contains default parameters for
+	// currency and number formatting
+	lib.settings = {
+		currency: {
+			symbol : "$",		// default currency symbol is '$'
+			format : "%s%v",	// controls output: %s = symbol, %v = value (can be object, see docs)
+			decimal : ".",		// decimal point separator
+			thousand : ",",		// thousands separator
+			precision : 2,		// decimal places
+			grouping : 3		// digit grouping (not implemented yet)
+		},
+		number: {
+			precision : 0,		// default precision on numbers is 0
+			grouping : 3,		// digit grouping (not implemented yet)
+			thousand : ",",
+			decimal : "."
+		}
+	};
+
+
+	/* --- Internal Helper Methods --- */
+
+	// Store reference to possibly-available ECMAScript 5 methods for later
+	var nativeMap = Array.prototype.map,
+		nativeIsArray = Array.isArray,
+		toString = Object.prototype.toString;
+
+	/**
+	 * Tests whether supplied parameter is a string
+	 * from underscore.js
+	 */
+	function isString(obj) {
+		return !!(obj === '' || (obj && obj.charCodeAt && obj.substr));
+	}
+
+	/**
+	 * Tests whether supplied parameter is a string
+	 * from underscore.js, delegates to ECMA5's native Array.isArray
+	 */
+	function isArray(obj) {
+		return nativeIsArray ? nativeIsArray(obj) : toString.call(obj) === '[object Array]';
+	}
+
+	/**
+	 * Tests whether supplied parameter is a true object
+	 */
+	function isObject(obj) {
+		return obj && toString.call(obj) === '[object Object]';
+	}
+
+	/**
+	 * Extends an object with a defaults object, similar to underscore's _.defaults
+	 *
+	 * Used for abstracting parameter handling from API methods
+	 */
+	function defaults(object, defs) {
+		var key;
+		object = object || {};
+		defs = defs || {};
+		// Iterate over object non-prototype properties:
+		for (key in defs) {
+			if (defs.hasOwnProperty(key)) {
+				// Replace values with defaults only if undefined (allow empty/zero values):
+				if (object[key] == null) object[key] = defs[key];
+			}
+		}
+		return object;
+	}
+
+	/**
+	 * Implementation of `Array.map()` for iteration loops
+	 *
+	 * Returns a new Array as a result of calling `iterator` on each array value.
+	 * Defers to native Array.map if available
+	 */
+	function map(obj, iterator, context) {
+		var results = [], i, j;
+
+		if (!obj) return results;
+
+		// Use native .map method if it exists:
+		if (nativeMap && obj.map === nativeMap) return obj.map(iterator, context);
+
+		// Fallback for native .map:
+		for (i = 0, j = obj.length; i < j; i++ ) {
+			results[i] = iterator.call(context, obj[i], i, obj);
+		}
+		return results;
+	}
+
+	/**
+	 * Check and normalise the value of precision (must be positive integer)
+	 */
+	function checkPrecision(val, base) {
+		val = Math.round(Math.abs(val));
+		return isNaN(val)? base : val;
+	}
+
+
+	/**
+	 * Parses a format string or object and returns format obj for use in rendering
+	 *
+	 * `format` is either a string with the default (positive) format, or object
+	 * containing `pos` (required), `neg` and `zero` values (or a function returning
+	 * either a string or object)
+	 *
+	 * Either string or format.pos must contain "%v" (value) to be valid
+	 */
+	function checkCurrencyFormat(format) {
+		var defaults = lib.settings.currency.format;
+
+		// Allow function as format parameter (should return string or object):
+		if ( typeof format === "function" ) format = format();
+
+		// Format can be a string, in which case `value` ("%v") must be present:
+		if ( isString( format ) && format.match("%v") ) {
+
+			// Create and return positive, negative and zero formats:
+			return {
+				pos : format,
+				neg : format.replace("-", "").replace("%v", "-%v"),
+				zero : format
+			};
+
+		// If no format, or object is missing valid positive value, use defaults:
+		} else if ( !format || !format.pos || !format.pos.match("%v") ) {
+
+			// If defaults is a string, casts it to an object for faster checking next time:
+			return ( !isString( defaults ) ) ? defaults : lib.settings.currency.format = {
+				pos : defaults,
+				neg : defaults.replace("%v", "-%v"),
+				zero : defaults
+			};
+
+		}
+		// Otherwise, assume format was fine:
+		return format;
+	}
+
+
+	/* --- API Methods --- */
+
+	/**
+	 * Takes a string/array of strings, removes all formatting/cruft and returns the raw float value
+	 * Alias: `accounting.parse(string)`
+	 *
+	 * Decimal must be included in the regular expression to match floats (defaults to
+	 * accounting.settings.number.decimal), so if the number uses a non-standard decimal 
+	 * separator, provide it as the second argument.
+	 *
+	 * Also matches bracketed negatives (eg. "$ (1.99)" => -1.99)
+	 *
+	 * Doesn't throw any errors (`NaN`s become 0) but this may change in future
+	 */
+	var unformat = lib.unformat = lib.parse = function(value, decimal) {
+		// Recursively unformat arrays:
+		if (isArray(value)) {
+			return map(value, function(val) {
+				return unformat(val, decimal);
+			});
+		}
+
+		// Fails silently (need decent errors):
+		value = value || 0;
+
+		// Return the value as-is if it's already a number:
+		if (typeof value === "number") return value;
+
+		// Default decimal point comes from settings, but could be set to eg. "," in opts:
+		decimal = decimal || lib.settings.number.decimal;
+
+		 // Build regex to strip out everything except digits, decimal point and minus sign:
+		var regex = new RegExp("[^0-9-" + decimal + "]", ["g"]),
+			unformatted = parseFloat(
+				("" + value)
+				.replace(/\((.*)\)/, "-$1") // replace bracketed values with negatives
+				.replace(regex, '')         // strip out any cruft
+				.replace(decimal, '.')      // make sure decimal point is standard
+			);
+
+		// This will fail silently which may cause trouble, let's wait and see:
+		return !isNaN(unformatted) ? unformatted : 0;
+	};
+
+
+	/**
+	 * Implementation of toFixed() that treats floats more like decimals
+	 *
+	 * Fixes binary rounding issues (eg. (0.615).toFixed(2) === "0.61") that present
+	 * problems for accounting- and finance-related software.
+	 */
+	var toFixed = lib.toFixed = function(value, precision) {
+		precision = checkPrecision(precision, lib.settings.number.precision);
+		var power = Math.pow(10, precision);
+
+		// Multiply up by precision, round accurately, then divide and use native toFixed():
+		return (Math.round(lib.unformat(value) * power) / power).toFixed(precision);
+	};
+
+
+	/**
+	 * Format a number, with comma-separated thousands and custom precision/decimal places
+	 * Alias: `accounting.format()`
+	 *
+	 * Localise by overriding the precision and thousand / decimal separators
+	 * 2nd parameter `precision` can be an object matching `settings.number`
+	 */
+	var formatNumber = lib.formatNumber = lib.format = function(number, precision, thousand, decimal) {
+		// Resursively format arrays:
+		if (isArray(number)) {
+			return map(number, function(val) {
+				return formatNumber(val, precision, thousand, decimal);
+			});
+		}
+
+		// Clean up number:
+		number = unformat(number);
+
+		// Build options object from second param (if object) or all params, extending defaults:
+		var opts = defaults(
+				(isObject(precision) ? precision : {
+					precision : precision,
+					thousand : thousand,
+					decimal : decimal
+				}),
+				lib.settings.number
+			),
+
+			// Clean up precision
+			usePrecision = checkPrecision(opts.precision),
+
+			// Do some calc:
+			negative = number < 0 ? "-" : "",
+			base = parseInt(toFixed(Math.abs(number || 0), usePrecision), 10) + "",
+			mod = base.length > 3 ? base.length % 3 : 0;
+
+		// Format the number:
+		return negative + (mod ? base.substr(0, mod) + opts.thousand : "") + base.substr(mod).replace(/(\d{3})(?=\d)/g, "$1" + opts.thousand) + (usePrecision ? opts.decimal + toFixed(Math.abs(number), usePrecision).split('.')[1] : "");
+	};
+
+
+	/**
+	 * Format a number into currency
+	 *
+	 * Usage: accounting.formatMoney(number, symbol, precision, thousandsSep, decimalSep, format)
+	 * defaults: (0, "$", 2, ",", ".", "%s%v")
+	 *
+	 * Localise by overriding the symbol, precision, thousand / decimal separators and format
+	 * Second param can be an object matching `settings.currency` which is the easiest way.
+	 *
+	 * To do: tidy up the parameters
+	 */
+	var formatMoney = lib.formatMoney = function(number, symbol, precision, thousand, decimal, format) {
+		// Resursively format arrays:
+		if (isArray(number)) {
+			return map(number, function(val){
+				return formatMoney(val, symbol, precision, thousand, decimal, format);
+			});
+		}
+
+		// Clean up number:
+		number = unformat(number);
+
+		// Build options object from second param (if object) or all params, extending defaults:
+		var opts = defaults(
+				(isObject(symbol) ? symbol : {
+					symbol : symbol,
+					precision : precision,
+					thousand : thousand,
+					decimal : decimal,
+					format : format
+				}),
+				lib.settings.currency
+			),
+
+			// Check format (returns object with pos, neg and zero):
+			formats = checkCurrencyFormat(opts.format),
+
+			// Choose which format to use for this value:
+			useFormat = number > 0 ? formats.pos : number < 0 ? formats.neg : formats.zero;
+
+		// Return with currency symbol added:
+		return useFormat.replace('%s', opts.symbol).replace('%v', formatNumber(Math.abs(number), checkPrecision(opts.precision), opts.thousand, opts.decimal));
+	};
+
+
+	/**
+	 * Format a list of numbers into an accounting column, padding with whitespace
+	 * to line up currency symbols, thousand separators and decimals places
+	 *
+	 * List should be an array of numbers
+	 * Second parameter can be an object containing keys that match the params
+	 *
+	 * Returns array of accouting-formatted number strings of same length
+	 *
+	 * NB: `white-space:pre` CSS rule is required on the list container to prevent
+	 * browsers from collapsing the whitespace in the output strings.
+	 */
+	lib.formatColumn = function(list, symbol, precision, thousand, decimal, format) {
+		if (!list) return [];
+
+		// Build options object from second param (if object) or all params, extending defaults:
+		var opts = defaults(
+				(isObject(symbol) ? symbol : {
+					symbol : symbol,
+					precision : precision,
+					thousand : thousand,
+					decimal : decimal,
+					format : format
+				}),
+				lib.settings.currency
+			),
+
+			// Check format (returns object with pos, neg and zero), only need pos for now:
+			formats = checkCurrencyFormat(opts.format),
+
+			// Whether to pad at start of string or after currency symbol:
+			padAfterSymbol = formats.pos.indexOf("%s") < formats.pos.indexOf("%v") ? true : false,
+
+			// Store value for the length of the longest string in the column:
+			maxLength = 0,
+
+			// Format the list according to options, store the length of the longest string:
+			formatted = map(list, function(val, i) {
+				if (isArray(val)) {
+					// Recursively format columns if list is a multi-dimensional array:
+					return lib.formatColumn(val, opts);
+				} else {
+					// Clean up the value
+					val = unformat(val);
+
+					// Choose which format to use for this value (pos, neg or zero):
+					var useFormat = val > 0 ? formats.pos : val < 0 ? formats.neg : formats.zero,
+
+						// Format this value, push into formatted list and save the length:
+						fVal = useFormat.replace('%s', opts.symbol).replace('%v', formatNumber(Math.abs(val), checkPrecision(opts.precision), opts.thousand, opts.decimal));
+
+					if (fVal.length > maxLength) maxLength = fVal.length;
+					return fVal;
+				}
+			});
+
+		// Pad each number in the list and send back the column of numbers:
+		return map(formatted, function(val, i) {
+			// Only if this is a string (not a nested array, which would have already been padded):
+			if (isString(val) && val.length < maxLength) {
+				// Depending on symbol position, pad after symbol or at index 0:
+				return padAfterSymbol ? val.replace(opts.symbol, opts.symbol+(new Array(maxLength - val.length + 1).join(" "))) : (new Array(maxLength - val.length + 1).join(" ")) + val;
+			}
+			return val;
+		});
+	};
+
+
+	/* --- Module Definition --- */
+
+	// Export accounting for CommonJS. If being loaded as an AMD module, define it as such.
+	// Otherwise, just add `accounting` to the global object
+	if (true) {
+		if ( true && module.exports) {
+			exports = module.exports = lib;
+		}
+		exports.accounting = lib;
+	} else {}
+
+	// Root will be `window` in browser or `global` on the server:
+}(this));
+
+
+/***/ }),
+
 /***/ "./node_modules/axios/index.js":
 /*!*************************************!*\
   !*** ./node_modules/axios/index.js ***!
@@ -8167,6 +8568,83 @@ __webpack_require__.r(__webpack_exports__);
 
 /***/ }),
 
+/***/ "./node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/Card.vue?vue&type=script&lang=js&":
+/*!*******************************************************************************************************************************************************************************************************************!*\
+  !*** ./node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/Card.vue?vue&type=script&lang=js& ***!
+  \*******************************************************************************************************************************************************************************************************************/
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
+/* harmony export */ });
+/* harmony import */ var accounting__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! accounting */ "./node_modules/accounting/accounting.js");
+/* harmony import */ var accounting__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(accounting__WEBPACK_IMPORTED_MODULE_0__);
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = ({
+  props: ['product', 'stars', 'sale'],
+  methods: {
+    addToCart: function addToCart() {
+      var _this = this;
+
+      console.log('Agregando producto ' + this.product.name + ' al carrito');
+      var payload = {
+        id: this.product.id,
+        name: this.product.name,
+        price: this.product.price,
+        quantity: 1
+      };
+      axios.post("cart/add", payload).then(function (response) {
+        _this.loading = false;
+        swal.fire("!Agregado!", response.data.message, "success");
+      })["catch"](function (error) {
+        _this.errors = error.response.data.errors;
+        _this.loading = false;
+      });
+    }
+  },
+  filters: {
+    money: function money(val) {
+      return accounting__WEBPACK_IMPORTED_MODULE_0___default().formatMoney(val);
+    }
+  }
+});
+
+/***/ }),
+
 /***/ "./node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/List.vue?vue&type=script&lang=js&":
 /*!*******************************************************************************************************************************************************************************************************************!*\
   !*** ./node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/List.vue?vue&type=script&lang=js& ***!
@@ -8178,6 +8656,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
 /* harmony export */ });
+/* harmony import */ var _Card_vue__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./Card.vue */ "./resources/js/components/welcome/Card.vue");
 //
 //
 //
@@ -8191,200 +8670,30 @@ __webpack_require__.r(__webpack_exports__);
 //
 //
 //
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = ({});
+
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = ({
+  components: {
+    Card: _Card_vue__WEBPACK_IMPORTED_MODULE_0__["default"]
+  },
+  data: function data() {
+    return {
+      errors: [],
+      products: []
+    };
+  },
+  created: function created() {
+    this.fetchProducts();
+  },
+  methods: {
+    fetchProducts: function fetchProducts() {
+      var _this = this;
+
+      axios.get('products/json').then(function (response) {
+        _this.products = response.data;
+      });
+    }
+  }
+});
 
 /***/ }),
 
@@ -57879,6 +58188,45 @@ component.options.__file = "resources/js/components/users/Table.vue"
 
 /***/ }),
 
+/***/ "./resources/js/components/welcome/Card.vue":
+/*!**************************************************!*\
+  !*** ./resources/js/components/welcome/Card.vue ***!
+  \**************************************************/
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
+/* harmony export */ });
+/* harmony import */ var _Card_vue_vue_type_template_id_6c1f09f0___WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./Card.vue?vue&type=template&id=6c1f09f0& */ "./resources/js/components/welcome/Card.vue?vue&type=template&id=6c1f09f0&");
+/* harmony import */ var _Card_vue_vue_type_script_lang_js___WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./Card.vue?vue&type=script&lang=js& */ "./resources/js/components/welcome/Card.vue?vue&type=script&lang=js&");
+/* harmony import */ var _node_modules_vue_loader_lib_runtime_componentNormalizer_js__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! !../../../../node_modules/vue-loader/lib/runtime/componentNormalizer.js */ "./node_modules/vue-loader/lib/runtime/componentNormalizer.js");
+
+
+
+
+
+/* normalize component */
+;
+var component = (0,_node_modules_vue_loader_lib_runtime_componentNormalizer_js__WEBPACK_IMPORTED_MODULE_2__["default"])(
+  _Card_vue_vue_type_script_lang_js___WEBPACK_IMPORTED_MODULE_1__["default"],
+  _Card_vue_vue_type_template_id_6c1f09f0___WEBPACK_IMPORTED_MODULE_0__.render,
+  _Card_vue_vue_type_template_id_6c1f09f0___WEBPACK_IMPORTED_MODULE_0__.staticRenderFns,
+  false,
+  null,
+  null,
+  null
+  
+)
+
+/* hot reload */
+if (false) { var api; }
+component.options.__file = "resources/js/components/welcome/Card.vue"
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (component.exports);
+
+/***/ }),
+
 /***/ "./resources/js/components/welcome/List.vue":
 /*!**************************************************!*\
   !*** ./resources/js/components/welcome/List.vue ***!
@@ -58203,6 +58551,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _node_modules_babel_loader_lib_index_js_clonedRuleSet_5_0_rules_0_use_0_node_modules_vue_loader_lib_index_js_vue_loader_options_Table_vue_vue_type_script_lang_js___WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! -!../../../../node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!../../../../node_modules/vue-loader/lib/index.js??vue-loader-options!./Table.vue?vue&type=script&lang=js& */ "./node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/users/Table.vue?vue&type=script&lang=js&");
  /* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (_node_modules_babel_loader_lib_index_js_clonedRuleSet_5_0_rules_0_use_0_node_modules_vue_loader_lib_index_js_vue_loader_options_Table_vue_vue_type_script_lang_js___WEBPACK_IMPORTED_MODULE_0__["default"]); 
+
+/***/ }),
+
+/***/ "./resources/js/components/welcome/Card.vue?vue&type=script&lang=js&":
+/*!***************************************************************************!*\
+  !*** ./resources/js/components/welcome/Card.vue?vue&type=script&lang=js& ***!
+  \***************************************************************************/
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
+/* harmony export */ });
+/* harmony import */ var _node_modules_babel_loader_lib_index_js_clonedRuleSet_5_0_rules_0_use_0_node_modules_vue_loader_lib_index_js_vue_loader_options_Card_vue_vue_type_script_lang_js___WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! -!../../../../node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!../../../../node_modules/vue-loader/lib/index.js??vue-loader-options!./Card.vue?vue&type=script&lang=js& */ "./node_modules/babel-loader/lib/index.js??clonedRuleSet-5[0].rules[0].use[0]!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/Card.vue?vue&type=script&lang=js&");
+ /* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (_node_modules_babel_loader_lib_index_js_clonedRuleSet_5_0_rules_0_use_0_node_modules_vue_loader_lib_index_js_vue_loader_options_Card_vue_vue_type_script_lang_js___WEBPACK_IMPORTED_MODULE_0__["default"]); 
 
 /***/ }),
 
@@ -58550,6 +58914,23 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "staticRenderFns": () => (/* reexport safe */ _node_modules_vue_loader_lib_loaders_templateLoader_js_vue_loader_options_node_modules_vue_loader_lib_index_js_vue_loader_options_Table_vue_vue_type_template_id_1c3b1f28___WEBPACK_IMPORTED_MODULE_0__.staticRenderFns)
 /* harmony export */ });
 /* harmony import */ var _node_modules_vue_loader_lib_loaders_templateLoader_js_vue_loader_options_node_modules_vue_loader_lib_index_js_vue_loader_options_Table_vue_vue_type_template_id_1c3b1f28___WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! -!../../../../node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!../../../../node_modules/vue-loader/lib/index.js??vue-loader-options!./Table.vue?vue&type=template&id=1c3b1f28& */ "./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/users/Table.vue?vue&type=template&id=1c3b1f28&");
+
+
+/***/ }),
+
+/***/ "./resources/js/components/welcome/Card.vue?vue&type=template&id=6c1f09f0&":
+/*!*********************************************************************************!*\
+  !*** ./resources/js/components/welcome/Card.vue?vue&type=template&id=6c1f09f0& ***!
+  \*********************************************************************************/
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "render": () => (/* reexport safe */ _node_modules_vue_loader_lib_loaders_templateLoader_js_vue_loader_options_node_modules_vue_loader_lib_index_js_vue_loader_options_Card_vue_vue_type_template_id_6c1f09f0___WEBPACK_IMPORTED_MODULE_0__.render),
+/* harmony export */   "staticRenderFns": () => (/* reexport safe */ _node_modules_vue_loader_lib_loaders_templateLoader_js_vue_loader_options_node_modules_vue_loader_lib_index_js_vue_loader_options_Card_vue_vue_type_template_id_6c1f09f0___WEBPACK_IMPORTED_MODULE_0__.staticRenderFns)
+/* harmony export */ });
+/* harmony import */ var _node_modules_vue_loader_lib_loaders_templateLoader_js_vue_loader_options_node_modules_vue_loader_lib_index_js_vue_loader_options_Card_vue_vue_type_template_id_6c1f09f0___WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! -!../../../../node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!../../../../node_modules/vue-loader/lib/index.js??vue-loader-options!./Card.vue?vue&type=template&id=6c1f09f0& */ "./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/Card.vue?vue&type=template&id=6c1f09f0&");
 
 
 /***/ }),
@@ -61732,6 +62113,102 @@ render._withStripped = true
 
 /***/ }),
 
+/***/ "./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/Card.vue?vue&type=template&id=6c1f09f0&":
+/*!************************************************************************************************************************************************************************************************************************!*\
+  !*** ./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/Card.vue?vue&type=template&id=6c1f09f0& ***!
+  \************************************************************************************************************************************************************************************************************************/
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "render": () => (/* binding */ render),
+/* harmony export */   "staticRenderFns": () => (/* binding */ staticRenderFns)
+/* harmony export */ });
+var render = function () {
+  var _vm = this
+  var _h = _vm.$createElement
+  var _c = _vm._self._c || _h
+  return _c("div", { staticClass: "card h-100" }, [
+    _vm.sale
+      ? _c(
+          "div",
+          {
+            staticClass: "badge bg-dark text-white position-absolute",
+            staticStyle: { top: "0.5rem", right: "0.5rem" },
+          },
+          [_vm._v("Sale\n    ")]
+        )
+      : _vm._e(),
+    _vm._v(" "),
+    _c("img", {
+      staticClass: "card-img-top mt-4",
+      staticStyle: { height: "150px", "object-fit": "scale-down" },
+      attrs: { src: _vm.product.url_image, alt: _vm.product.name },
+    }),
+    _vm._v(" "),
+    _c("div", { staticClass: "card-body p-4" }, [
+      _c("div", { staticClass: "text-center" }, [
+        _c("h4", { staticClass: "text-center" }, [
+          _vm._v(_vm._s(_vm.product.brand.name)),
+        ]),
+        _vm._v(" "),
+        _c("h5", { staticClass: "fw-bolder" }, [
+          _vm._v(_vm._s(_vm.product.name)),
+        ]),
+        _vm._v(" "),
+        _c("span", [_vm._v(" " + _vm._s(_vm.product.description))]),
+        _c("br"),
+        _vm._v(" "),
+        _vm.stars > 0
+          ? _c(
+              "div",
+              {
+                staticClass:
+                  "d-flex justify-content-center small text-warning mb-2",
+              },
+              _vm._l(_vm.stars, function (n) {
+                return _c("i", { key: n, staticClass: "fa-solid fa-star" })
+              }),
+              0
+            )
+          : _vm._e(),
+        _vm._v(" "),
+        _c("h3", { staticClass: "mt-4" }, [
+          _vm._v(_vm._s(_vm._f("money")(_vm.product.price))),
+        ]),
+      ]),
+    ]),
+    _vm._v(" "),
+    _c(
+      "div",
+      { staticClass: "card-footer p-4 pt-0 border-top-0 bg-transparent" },
+      [
+        _c("div", { staticClass: "text-center" }, [
+          _c(
+            "button",
+            {
+              staticClass: "btn btn-outline-dark mt-auto",
+              on: {
+                click: function ($event) {
+                  return _vm.addToCart()
+                },
+              },
+            },
+            [_vm._v("Agregar al carrito")]
+          ),
+        ]),
+      ]
+    ),
+  ])
+}
+var staticRenderFns = []
+render._withStripped = true
+
+
+
+/***/ }),
+
 /***/ "./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/List.vue?vue&type=template&id=1aa33996&":
 /*!************************************************************************************************************************************************************************************************************************!*\
   !*** ./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/vue-loader/lib/index.js??vue-loader-options!./resources/js/components/welcome/List.vue?vue&type=template&id=1aa33996& ***!
@@ -61748,519 +62225,28 @@ var render = function () {
   var _vm = this
   var _h = _vm.$createElement
   var _c = _vm._self._c || _h
-  return _vm._m(0)
+  return _c("section", { staticClass: "py-5" }, [
+    _c("div", { staticClass: "container px-4 px-lg-5 mt-5" }, [
+      _c(
+        "div",
+        {
+          staticClass:
+            "row gx-4 gx-lg-5 row-cols-2 row-cols-md-3 row-cols-xl-4 justify-content-center",
+        },
+        _vm._l(_vm.products, function (product) {
+          return _c(
+            "div",
+            { key: product.id, staticClass: "col mb-5" },
+            [_c("Card", { attrs: { product: product, btn_link: "#" } })],
+            1
+          )
+        }),
+        0
+      ),
+    ]),
+  ])
 }
-var staticRenderFns = [
-  function () {
-    var _vm = this
-    var _h = _vm.$createElement
-    var _c = _vm._self._c || _h
-    return _c("section", { staticClass: "py-5" }, [
-      _c("div", { staticClass: "container px-4 px-lg-5 mt-5" }, [
-        _c(
-          "div",
-          {
-            staticClass:
-              "row gx-4 gx-lg-5 row-cols-2 row-cols-md-3 row-cols-xl-4 justify-content-center",
-          },
-          [
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Fancy Product"),
-                    ]),
-                    _vm._v(" "),
-                    _vm._v(
-                      "\r\n                                $40.00 - $80.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("View options")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-            _vm._v(" "),
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c(
-                  "div",
-                  {
-                    staticClass: "badge bg-dark text-white position-absolute",
-                    staticStyle: { top: "0.5rem", right: "0.5rem" },
-                  },
-                  [_vm._v("Sale")]
-                ),
-                _vm._v(" "),
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Special Item"),
-                    ]),
-                    _vm._v(" "),
-                    _c(
-                      "div",
-                      {
-                        staticClass:
-                          "d-flex justify-content-center small text-warning mb-2",
-                      },
-                      [
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                      ]
-                    ),
-                    _vm._v(" "),
-                    _c(
-                      "span",
-                      {
-                        staticClass: "text-muted text-decoration-line-through",
-                      },
-                      [_vm._v("$20.00")]
-                    ),
-                    _vm._v(
-                      "\r\n                                $18.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("Add to cart")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-            _vm._v(" "),
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c(
-                  "div",
-                  {
-                    staticClass: "badge bg-dark text-white position-absolute",
-                    staticStyle: { top: "0.5rem", right: "0.5rem" },
-                  },
-                  [_vm._v("Sale")]
-                ),
-                _vm._v(" "),
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Sale Item"),
-                    ]),
-                    _vm._v(" "),
-                    _c(
-                      "span",
-                      {
-                        staticClass: "text-muted text-decoration-line-through",
-                      },
-                      [_vm._v("$50.00")]
-                    ),
-                    _vm._v(
-                      "\r\n                                $25.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("Add to cart")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-            _vm._v(" "),
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Popular Item"),
-                    ]),
-                    _vm._v(" "),
-                    _c(
-                      "div",
-                      {
-                        staticClass:
-                          "d-flex justify-content-center small text-warning mb-2",
-                      },
-                      [
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                      ]
-                    ),
-                    _vm._v(" "),
-                    _vm._v(
-                      "\r\n                                $40.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("Add to cart")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-            _vm._v(" "),
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c(
-                  "div",
-                  {
-                    staticClass: "badge bg-dark text-white position-absolute",
-                    staticStyle: { top: "0.5rem", right: "0.5rem" },
-                  },
-                  [_vm._v("Sale")]
-                ),
-                _vm._v(" "),
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Sale Item"),
-                    ]),
-                    _vm._v(" "),
-                    _c(
-                      "span",
-                      {
-                        staticClass: "text-muted text-decoration-line-through",
-                      },
-                      [_vm._v("$50.00")]
-                    ),
-                    _vm._v(
-                      "\r\n                                $25.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("Add to cart")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-            _vm._v(" "),
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Fancy Product"),
-                    ]),
-                    _vm._v(" "),
-                    _vm._v(
-                      "\r\n                                $120.00 - $280.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("View options")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-            _vm._v(" "),
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c(
-                  "div",
-                  {
-                    staticClass: "badge bg-dark text-white position-absolute",
-                    staticStyle: { top: "0.5rem", right: "0.5rem" },
-                  },
-                  [_vm._v("Sale")]
-                ),
-                _vm._v(" "),
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Special Item"),
-                    ]),
-                    _vm._v(" "),
-                    _c(
-                      "div",
-                      {
-                        staticClass:
-                          "d-flex justify-content-center small text-warning mb-2",
-                      },
-                      [
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                      ]
-                    ),
-                    _vm._v(" "),
-                    _c(
-                      "span",
-                      {
-                        staticClass: "text-muted text-decoration-line-through",
-                      },
-                      [_vm._v("$20.00")]
-                    ),
-                    _vm._v(
-                      "\r\n                                $18.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("Add to cart")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-            _vm._v(" "),
-            _c("div", { staticClass: "col mb-5" }, [
-              _c("div", { staticClass: "card h-100" }, [
-                _c("img", {
-                  staticClass: "card-img-top",
-                  attrs: {
-                    src: "https://dummyimage.com/450x300/dee2e6/6c757d.jpg",
-                    alt: "...",
-                  },
-                }),
-                _vm._v(" "),
-                _c("div", { staticClass: "card-body p-4" }, [
-                  _c("div", { staticClass: "text-center" }, [
-                    _c("h5", { staticClass: "fw-bolder" }, [
-                      _vm._v("Popular Item"),
-                    ]),
-                    _vm._v(" "),
-                    _c(
-                      "div",
-                      {
-                        staticClass:
-                          "d-flex justify-content-center small text-warning mb-2",
-                      },
-                      [
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                        _vm._v(" "),
-                        _c("div", { staticClass: "bi-star-fill" }),
-                      ]
-                    ),
-                    _vm._v(" "),
-                    _vm._v(
-                      "\r\n                                $40.00\r\n                            "
-                    ),
-                  ]),
-                ]),
-                _vm._v(" "),
-                _c(
-                  "div",
-                  {
-                    staticClass:
-                      "card-footer p-4 pt-0 border-top-0 bg-transparent",
-                  },
-                  [
-                    _c("div", { staticClass: "text-center" }, [
-                      _c(
-                        "a",
-                        {
-                          staticClass: "btn btn-outline-dark mt-auto",
-                          attrs: { href: "#" },
-                        },
-                        [_vm._v("Add to cart")]
-                      ),
-                    ]),
-                  ]
-                ),
-              ]),
-            ]),
-          ]
-        ),
-      ]),
-    ])
-  },
-]
+var staticRenderFns = []
 render._withStripped = true
 
 

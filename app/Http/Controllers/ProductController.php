@@ -18,7 +18,7 @@ class ProductController extends Controller
 
     public function __construct()
     {
-        $this->middleware('auth');
+        $this->middleware('auth')->except('json');
     }
     
     public function index(Request $request)
@@ -30,6 +30,10 @@ class ProductController extends Controller
         }
         return view('productos.index');
     }
+    
+    public function json(){
+        return Product::with(['brand','category'])->get();
+     }
 
     /**
      * Show the form for creating a new resource.
@@ -85,7 +89,4 @@ class ProductController extends Controller
         ]);
     }
 
-    public function json(){
-        return Product::all();
-     }
 }
